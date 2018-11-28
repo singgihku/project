@@ -1,0 +1,524 @@
+---
+title: "TCASH Alert"
+output: html_document
+---
+
+***
+
+```{r, echo=FALSE, message=FALSE,results = "hide", warning=FALSE}
+
+library(data.table)
+library(dplyr)
+library(lubridate)
+library(tableHTML)
+
+
+
+#SETUP
+rm(list=ls())
+#wd <- "D:/RA-FILES/Wholesale and Broadband Revenue Assurance/03New Business/TCASH/05_Current_Alert/"
+wd <- "/home/rickygf/NBBRA/RuleBaseAlert/"
+setwd(wd)
+options(scipen = 999)
+
+yesterday_filedate <- paste("logs/tcash_revas_",format(Sys.Date()-1, "%Y%m%d"),".txt",sep="") 
+#yesterday_filedate <- "logs/tcash_revas_20181011.txt"
+
+yesterday <- Sys.Date()-1
+#yesterday <- "2018-10-11"
+
+sDate <- yesterday
+eDate <- yesterday
+sDateTime <- paste(sDate,"00:00:00",sep=" ")
+eDateTime <- paste(eDate,"23:59:59",sep=" ")
+
+
+#LOAD DATA
+df_file <- read.csv(yesterday_filedate,header=F,sep="|",colClasses=c("character","numeric",rep("character",4),rep("numeric",3),"character"))   
+colnames(df_file) <- c("trx_date","trx_id","order_id","identity_id","identity_desc","identity_type","credit","debit","balance","trx_type_desc")
+df_file$trx_date <- as.POSIXct(df_file$trx_date, format="%d%m%Y %H:%M:%S")
+df_file <- df_file %>% 
+           filter(trx_date >= as.POSIXct(sDateTime) & trx_date <= as.POSIXct(eDateTime)) %>% 
+           arrange(trx_date)
+
+
+#Check Balance more than 20 juta
+#--update data for dummy check
+#df_file[df_file$trx_id=="790831852" & df_file$order_id=="5JB91N218J",]
+#df_file$balance[df_file$trx_id=="790831852" & df_file$order_id=="5JB91N218J"] <- 11000000
+#--run check
+balance_mt_10mil <- df_file %>% 
+  select(identity_id, identity_desc, identity_type,balance) %>% 
+  filter(identity_type == "1000") %>% 
+  filter(balance > 10000000) %>% 
+  arrange(desc(balance)) 
+#print("Customer Balance More Than 10 Million")
+#print(balance_mt_10mil)
+
+
+#High Debit & Credit 
+#-Debit by amount
+high_debit_amnt <- df_file %>% 
+  filter(identity_type == "1000") %>%
+  filter(debit != 0) %>% 
+  select(trx_date,identity_id,identity_desc,debit) %>% 
+  mutate(trx_date = strftime(trx_date, format = "%Y-%m-%d")) %>% 
+  group_by(trx_date,identity_id,identity_desc)%>%
+  summarise(count_trx=n(),total_debit_amount=sum(debit)) %>% 
+  mutate(avg_amnt_per_trx= round(total_debit_amount/count_trx)) %>% 
+  arrange(desc(total_debit_amount),desc(count_trx))
+#print("Top 10 Customer High Debit by Amount")
+high_debit_amnt <- head(high_debit_amnt,20)
+
+
+#-Debit by count
+high_debit_cnt <- df_file %>% 
+  filter(identity_type == "1000") %>%
+  filter(debit != 0) %>% 
+  select(trx_date,identity_id,identity_desc,debit) %>% 
+  mutate(trx_date = strftime(trx_date, format = "%Y-%m-%d")) %>% 
+  group_by(trx_date,identity_id,identity_desc)%>%
+  summarise(count_trx=n(),total_debit_amount=sum(debit)) %>% 
+  mutate(avg_amnt_per_trx= round(total_debit_amount/count_trx)) %>% 
+  arrange(desc(count_trx),desc(total_debit_amount))
+#print("Top 10 Customer High Debit by Count Trx")
+high_debit_cnt <- head(high_debit_cnt,20) 
+
+
+#-Credit by Amount
+high_credit_amnt <- df_file %>% 
+  filter(identity_type == "1000") %>%
+  filter(credit != 0) %>% 
+  select(trx_date,identity_id,identity_desc,credit) %>% 
+  mutate(trx_date = strftime(trx_date, format = "%Y-%m-%d")) %>% 
+  group_by(trx_date,identity_id,identity_desc)%>%
+  summarise(count_trx=n(),total_credit_amount=sum(credit)) %>% 
+  mutate(avg_amnt_per_trx= round(total_credit_amount/count_trx)) %>% 
+  arrange(desc(total_credit_amount),desc(count_trx))
+#print("Top 10 Customer High Credit by Amount")
+high_credit_amnt <- head(high_credit_amnt,10) 
+
+#-Credit by Count
+high_credit_cnt <- df_file %>% 
+  filter(identity_type == "1000") %>%
+  filter(credit != 0) %>% 
+  select(trx_date,identity_id,identity_desc,credit) %>% 
+  mutate(trx_date = strftime(trx_date, format = "%Y-%m-%d")) %>% 
+  group_by(trx_date,identity_id,identity_desc)%>%
+  summarise(count_trx=n(),total_credit_amount=sum(credit)) %>% 
+  mutate(avg_amnt_per_trx= round(total_credit_amount/count_trx)) %>% 
+  arrange(desc(count_trx),desc(total_credit_amount))
+#print("Top 10 Customer High Credit by Count Trx")
+high_credit_cnt <- head(high_credit_cnt,10)
+
+
+#Unmatch ref_num 
+#--update data for dummy check
+#head(df_file)
+#df_file[(df_file$trx_id=="790831853" & df_file$order_id=="5JB01N218K"),]
+#df_file <-df_file[!(df_file$trx_id=="790831853" & df_file$order_id=="5JB01N218K"),]
+#--run check full join
+debit_df_file <- filter(df_file,debit != 0)
+credit_df_file <- filter(df_file,credit != 0)
+join_refnum <- merge(x = debit_df_file, y = credit_df_file, by.x = "order_id",by.y = "order_id", all = TRUE)
+join_refnum_unmatched <- join_refnum[is.na(join_refnum$balance.x) | is.na(join_refnum$balance.y),]
+#print("Unmatched Debit-Credit Ref-Num")
+#print(join_refnum_unmatched)
+
+
+#Immediate cah-out after cash_in
+immediate_trx <- df_file %>% 
+  filter(identity_type == "1000") %>% 
+  #filter(!toupper(trx_type_desc) %like% "FEE") %>% 
+  #filter(!toupper(trx_type_desc) %like% "COMMISSION") %>%
+  #filter(!toupper(trx_type_desc) %like% "REVERSAL") %>%
+  arrange(identity_id, trx_date) %>% 
+  mutate(
+    order_id_out = ifelse((identity_id==lead(identity_id)  & credit !=0 & lead(debit !=0)),lead(order_id),NA),
+    trx_date_out = ifelse((identity_id==lead(identity_id)  & credit !=0 & lead(debit !=0)),lead(trx_date),NA),
+    trx_date_out = as.POSIXct(trx_date_out, origin = '1970-01-01'),
+    trx_type_desc_out = ifelse((identity_id==lead(identity_id)  & credit !=0 & lead(debit !=0)),lead(trx_type_desc),NA),
+    debit_out = ifelse((identity_id==lead(identity_id)  & credit !=0 & lead(debit !=0)),lead(debit),NA),
+    difftime_sec = difftime(trx_date_out, trx_date, units = "secs")
+  ) %>% 
+  filter(order_id != order_id_out) %>% 
+  filter(trx_type_desc %like% "Customer Deposit via Bank Switching") %>%
+  filter(trx_type_desc_out %like% "Cash out via bank switching") %>%
+  select(identity_id,identity_desc,order_id,trx_date,trx_type_desc,credit,order_id_out,trx_date_out,trx_type_desc_out,debit_out,difftime_sec) %>% 
+  filter(!is.na(difftime_sec) & difftime_sec < 60) %>% 
+  arrange(difftime_sec,identity_id)
+#print("Top 10 Customer Immediate Cash Out after Cash In via Bank Switching (time diff < 1 minute)")
+immediate_trx <- head(immediate_trx,10) 
+  
+
+#High Cash Back 
+#- Cashback by Amount
+cashback_high_amnt <- df_file %>% 
+  filter(identity_type == "1000") %>%
+  filter(toupper(trx_type_desc) %like% "CASHBACK" | toupper(trx_type_desc) %like% "CASH BACK") %>%
+  filter(credit != 0) %>% 
+  select(trx_date,identity_id,identity_desc,credit) %>% 
+  mutate(trx_date = strftime(trx_date, format = "%Y-%m-%d")) %>% 
+  group_by(trx_date,identity_id,identity_desc)%>%
+  summarise(count_trx=n(),total_cashback_amount=sum(credit)) %>% 
+  mutate(avg_amnt_per_trx= round(total_cashback_amount/count_trx)) %>% 
+  arrange(desc(total_cashback_amount,desc(count_trx)))
+#print("Top 10 Customer High Cashback by Amount")
+cashback_high_amnt <- head(cashback_high_amnt,10)
+
+#- Cashback by Count
+cashback_high_cnt <- df_file %>% 
+  filter(identity_type == "1000") %>%
+  filter(toupper(trx_type_desc) %like% "CASHBACK" | toupper(trx_type_desc) %like% "CASH BACK") %>%
+  filter(credit != 0) %>% 
+  select(trx_date,identity_id,identity_desc,credit) %>% 
+  mutate(trx_date = strftime(trx_date, format = "%Y-%m-%d")) %>% 
+  group_by(trx_date,identity_id,identity_desc)%>%
+  summarise(count_trx=n(),total_cashback_amount=sum(credit)) %>% 
+  mutate(avg_amnt_per_trx= round(total_cashback_amount/count_trx)) %>% 
+  arrange(desc(count_trx),desc(total_cashback_amount))
+#print("Top 10 Customer High Cashback by Count Trx")
+cashback_high_cnt <- head(cashback_high_cnt,10)
+
+
+
+#High Redeem Bonus
+#-update data for checking
+#df_file$trx_type_desc[df_file$trx_id=="790831850" & df_file$order_id=="5JB81N218I"] <- 'Balance From Redeemed Point of Credit Party'
+
+#- Redeem by Amount
+redeem_high_amnt <- df_file %>% 
+  filter(identity_type == "1000") %>%
+  filter(toupper(trx_type_desc) %like% "REDEEMED POINT") %>%
+  filter(credit != 0) %>% 
+  select(trx_date,identity_id,identity_desc,credit) %>% 
+  mutate(trx_date = strftime(trx_date, format = "%Y-%m-%d")) %>% 
+  group_by(trx_date,identity_id,identity_desc)%>%
+  summarise(count_trx=n(),total_redeemed_amount=sum(credit)) %>% 
+  mutate(avg_amnt_per_trx= round(total_redeemed_amount/count_trx)) %>% 
+  arrange(desc(total_redeemed_amount,desc(count_trx)))
+#print("Top 10 Customer High Redeem Bonus by Amount")
+redeem_high_amnt <- head(redeem_high_amnt,10)
+
+#- Redeem by Count
+redeem_high_cnt <- df_file %>% 
+  filter(identity_type == "1000") %>%
+  filter(toupper(trx_type_desc) %like% "REDEEMED POINT") %>%
+  filter(credit != 0) %>% 
+  select(trx_date,identity_id,identity_desc,credit) %>% 
+  mutate(trx_date = strftime(trx_date, format = "%Y-%m-%d")) %>% 
+  group_by(trx_date,identity_id,identity_desc)%>%
+  summarise(count_trx=n(),total_redeemed_amount=sum(credit)) %>% 
+  mutate(avg_amnt_per_trx= round(total_redeemed_amount/count_trx)) %>% 
+  arrange(desc(count_trx),desc(total_redeemed_amount))
+#print("Top 10 Customer High Redeem Bonus by Count Trx")
+redeem_high_amnt <- head(redeem_high_amnt,10) 
+
+
+#Customer recurrent cash out
+recurrent_cashout <- df_file %>% 
+  filter(identity_type == "1000") %>% 
+  filter(debit != 0) %>% 
+  arrange(trx_date) %>% 
+  #mutate(time_10sec = substr(strftime(trx_date, format="%Y-%m-%d %H:%M:%S"),1,18)) %>% 
+  mutate(interval_60sec = substr(strftime(trx_date, format="%Y-%m-%d %H:%M:%S"),1,16)) %>% 
+  #mutate(time_10min = substr(strftime(trx_date, format="%Y-%m-%d %H:%M:%S"),1,15)) %>% 
+  #mutate(time_60min = substr(strftime(trx_date, format="%Y-%m-%d %H:%M:%S"),1,13)) %>% 
+  #mutate(time_1hour = substr(strftime(trx_date, format="%Y-%m-%d %H:%M:%S"),1,12)) %>% 
+  group_by(identity_id,identity_desc,interval_60sec)  %>% 
+  summarise(count_trx=n(),total_debit_amount=sum(debit)) %>% 
+  mutate(avg_amnt_per_trx= total_debit_amount/count_trx) %>% 
+  arrange(desc(count_trx),desc(total_debit_amount))
+recurrent_cashout <- head(recurrent_cashout,20)
+
+
+
+#Customer recurrent cash in
+recurrent_cashin <- df_file %>% 
+  filter(identity_type == "1000") %>% 
+  filter(credit != 0) %>% 
+  arrange(trx_date) %>% 
+  #mutate(time_10sec = substr(strftime(trx_date, format="%Y-%m-%d %H:%M:%S"),1,18)) %>% 
+  mutate(interval_60sec = substr(strftime(trx_date, format="%Y-%m-%d %H:%M:%S"),1,16)) %>% 
+  #mutate(time_10min = substr(strftime(trx_date, format="%Y-%m-%d %H:%M:%S"),1,15)) %>% 
+  #mutate(time_60min = substr(strftime(trx_date, format="%Y-%m-%d %H:%M:%S"),1,13)) %>% 
+  #mutate(time_10hour = substr(strftime(trx_date, format="%Y-%m-%d %H:%M:%S"),1,12)) %>% 
+  group_by(identity_id,identity_desc,interval_60sec)  %>% 
+  summarise(count_trx=n(),total_credit_amount=sum(credit)) %>% 
+  mutate(avg_amnt_per_trx= total_credit_amount/count_trx) %>% 
+  arrange(desc(count_trx),desc(total_credit_amount))
+recurrent_cashin <- head(recurrent_cashin,20)
+
+
+#Balance Movement Integrity Check
+opening_balance_df <- df_file %>% 
+  group_by(identity_id) %>%
+  arrange(trx_date,trx_id)  %>%
+  slice(c(1)) %>%
+  ungroup() %>%
+  select(identity_id,balance) %>%
+  rename(opening_balance = balance)
+
+closing_balance_df <- df_file %>% 
+  group_by(identity_id) %>%
+  arrange(trx_date,trx_id)  %>%
+  slice(c(n())) %>%
+  ungroup() %>%
+  select(identity_id,balance) %>%
+  rename(closing_balance = balance)
+
+sum_df <- df_file %>% 
+  filter(toupper(trx_type_desc) !="FEE PAID TO TELKOMSEL")  %>%  
+  filter(toupper(trx_type_desc) !="BIAYA ADMIN PPOB")  %>%  
+  group_by(identity_id, identity_type) %>%
+  arrange(trx_date,trx_id)  %>%
+  mutate(debit = ifelse(row_number()==1, 0, debit)) %>%
+  mutate(credit = ifelse(row_number()==1, 0, credit)) %>%
+  summarize(credit=sum(credit),debit=sum(debit)) %>% 
+  mutate(net_usage=credit-debit) 
+
+sum_open_df <- inner_join(sum_df, opening_balance_df, by = "identity_id", copy = FALSE)
+sum_open_closing_df <- inner_join(sum_open_df, closing_balance_df, by = "identity_id", copy = FALSE)
+sum_open_closing_df <- sum_open_closing_df %>% 
+  mutate(closing_formula = opening_balance+net_usage) %>% 
+  mutate(gap_closing = round(closing_balance - closing_formula,2)) %>% 
+  filter(gap_closing > 0) %>%
+  arrange(desc(gap_closing)) 
+
+
+
+
+```
+
+***  
+  
+####Customer Balance More Than 10 Million
+```{r, echo=FALSE, results = "asis"}
+
+balance_mt_10mil %>%
+  mutate(balance = format(balance,format="d", big.mark=",")) %>% 
+  tableHTML() %>% 
+  add_css_row(css = list(c('font-size','font-family'),c('12px','Arial'))) %>% 
+  add_css_row(css = list('background-color', '#f2f2f2'),rows = odd(0:nrow(balance_mt_10mil)+1)) %>%
+  add_css_row(css = list('background-color', '#e6f0ff'),rows = even(0:nrow(balance_mt_10mil)+1)) %>%
+  add_css_column(css = list('text-align', 'right'),columns = c(4)) %>%
+  add_css_column(css = list('font-weight', 'bold'),columns = c(4))
+
+```
+  
+***  
+  
+####Top 20 Customer High Debit by Amount
+```{r, echo=FALSE, results = "asis"}
+
+high_debit_amnt %>%
+  mutate(total_debit_amount = format(total_debit_amount,format="d", big.mark=",")) %>% 
+  mutate(avg_amnt_per_trx = format(avg_amnt_per_trx,format="d", big.mark=",")) %>% 
+  tableHTML() %>% 
+  add_css_row(css = list(c('font-size','font-family'),c('12px','Arial'))) %>% 
+  add_css_row(css = list('background-color', '#f2f2f2'),rows = odd(0:nrow(high_debit_amnt)+1)) %>%
+  add_css_row(css = list('background-color', '#e6f0ff'),rows = even(0:nrow(high_debit_amnt)+1)) %>%
+  add_css_column(css = list('text-align', 'right'),columns = c(4:6))%>%
+  add_css_column(css = list('font-weight', 'bold'),columns = c(5))
+
+```
+  
+***  
+  
+####Top 20 Customer High Debit by Count Trx
+```{r, echo=FALSE, results = "asis"}
+high_debit_cnt %>%
+  mutate(total_debit_amount = format(total_debit_amount,format="d", big.mark=",")) %>% 
+  mutate(avg_amnt_per_trx = format(avg_amnt_per_trx,format="d", big.mark=",")) %>% 
+  tableHTML() %>% 
+  add_css_row(css = list(c('font-size','font-family'),c('12px','Arial'))) %>% 
+  add_css_row(css = list('background-color', '#f2f2f2'),rows = odd(0:nrow(high_debit_cnt)+1)) %>%
+  add_css_row(css = list('background-color', '#e6f0ff'),rows = even(0:nrow(high_debit_cnt)+1)) %>%
+  add_css_column(css = list('text-align', 'right'),columns = c(4:6))%>%
+  add_css_column(css = list('font-weight', 'bold'),columns = c(4))
+
+```
+
+***  
+  
+####Top 10 Customer High Credit by Amount
+```{r, echo=FALSE, results = "asis"}
+high_credit_amnt %>%
+  mutate(total_credit_amount = format(total_credit_amount,format="d", big.mark=",")) %>% 
+  mutate(avg_amnt_per_trx = format(avg_amnt_per_trx,format="d", big.mark=",")) %>% 
+  tableHTML() %>% 
+  add_css_row(css = list(c('font-size','font-family'),c('12px','Arial'))) %>% 
+  add_css_row(css = list('background-color', '#f2f2f2'),rows = odd(0:nrow(high_credit_amnt)+1)) %>%
+  add_css_row(css = list('background-color', '#e6f0ff'),rows = even(0:nrow(high_credit_amnt)+1)) %>%
+  add_css_column(css = list('text-align', 'right'),columns = c(4:6))%>%
+  add_css_column(css = list('font-weight', 'bold'),columns = c(5))
+
+
+
+```
+
+***  
+  
+####Top 10 Customer High Credit by Count Trx
+```{r, echo=FALSE, results = "asis"}
+
+high_credit_cnt %>%
+  mutate(total_credit_amount = format(total_credit_amount,format="d", big.mark=",")) %>% 
+  mutate(avg_amnt_per_trx = format(avg_amnt_per_trx,format="d", big.mark=",")) %>% 
+  tableHTML() %>% 
+  add_css_row(css = list(c('font-size','font-family'),c('12px','Arial'))) %>% 
+  add_css_row(css = list('background-color', '#f2f2f2'),rows = odd(0:nrow(high_credit_cnt)+1)) %>%
+  add_css_row(css = list('background-color', '#e6f0ff'),rows = even(0:nrow(high_credit_cnt)+1)) %>%
+  add_css_column(css = list('text-align', 'right'),columns = c(4:6))%>%
+  add_css_column(css = list('font-weight', 'bold'),columns = c(4))
+```
+
+***  
+  
+####Unmatched Debit-Credit Ref-Num
+```{r, echo=FALSE, results = "asis"}
+join_refnum_unmatched %>%
+  tableHTML(rownames = FALSE, second_headers = list(c(1, 9, 9), c('RefNum', 'Debit', 'Credit'))) %>% 
+  add_css_row(css = list(c('font-size','font-family'),c('12px','Arial'))) %>% 
+  add_css_row(css = list('background-color', '#f2f2f2'),rows = odd(0:nrow(join_refnum_unmatched)+2)) %>%
+  add_css_row(css = list('background-color', '#e6f0ff'),rows = even(0:nrow(join_refnum_unmatched)+2)) %>%
+  add_css_column(css = list('font-weight', 'bold'),columns = c(1))
+```
+
+***  
+  
+####Top 10 Customer Immediate Cash Out after Cash In via Bank Switching (time diff < 1 minute)
+```{r, echo=FALSE, results = "asis"}
+immediate_trx %>%
+  mutate(credit = format(credit,format="d", big.mark=",")) %>% 
+  mutate(debit_out = format(debit_out,format="d", big.mark=",")) %>% 
+  tableHTML() %>% 
+  add_css_row(css = list(c('font-size','font-family'),c('12px','Arial'))) %>% 
+  add_css_row(css = list('background-color', '#f2f2f2'),rows = odd(0:nrow(immediate_trx)+1)) %>%
+  add_css_row(css = list('background-color', '#e6f0ff'),rows = even(0:nrow(immediate_trx)+1)) %>%
+  add_css_column(css = list('text-align', 'right'),columns = c(6,10))%>%
+  add_css_column(css = list('text-align', 'center'),columns = c(11))%>%
+  add_css_column(css = list('font-weight', 'bold'),columns = c(11))
+```
+
+***  
+  
+####Top 10 Customer High Cashback by Amount
+```{r, echo=FALSE, results = "asis"}
+
+cashback_high_amnt %>%
+  mutate(total_cashback_amount = format(total_cashback_amount,format="d", big.mark=",")) %>% 
+  mutate(avg_amnt_per_trx = format(avg_amnt_per_trx,format="d", big.mark=",")) %>% 
+  tableHTML() %>% 
+  add_css_row(css = list(c('font-size','font-family'),c('12px','Arial'))) %>% 
+  add_css_row(css = list('background-color', '#f2f2f2'),rows = odd(0:nrow(cashback_high_amnt)+1)) %>%
+  add_css_row(css = list('background-color', '#e6f0ff'),rows = even(0:nrow(cashback_high_amnt)+1)) %>%
+  add_css_column(css = list('text-align', 'right'),columns = c(4:6))%>%
+  add_css_column(css = list('font-weight', 'bold'),columns = c(5))
+```
+
+***  
+  
+####Top 10 Customer High Cashback by Count Trx
+```{r, echo=FALSE, results = "asis"}
+
+cashback_high_cnt %>%
+  mutate(total_cashback_amount = format(total_cashback_amount,format="d", big.mark=",")) %>% 
+  mutate(avg_amnt_per_trx = format(avg_amnt_per_trx,format="d", big.mark=",")) %>% 
+  tableHTML() %>% 
+  add_css_row(css = list(c('font-size','font-family'),c('12px','Arial'))) %>% 
+  add_css_row(css = list('background-color', '#f2f2f2'),rows = odd(0:nrow(cashback_high_cnt)+1)) %>%
+  add_css_row(css = list('background-color', '#e6f0ff'),rows = even(0:nrow(cashback_high_cnt)+1)) %>%
+  add_css_column(css = list('text-align', 'right'),columns = c(4:6))%>%
+  add_css_column(css = list('font-weight', 'bold'),columns = c(4))
+```
+
+***  
+  
+####Top 10 Customer High Redeem Bonus by Amount
+```{r, echo=FALSE, results = "asis"}
+
+redeem_high_amnt %>%
+  mutate(total_redeemed_amount = format(total_redeemed_amount,format="d", big.mark=",")) %>% 
+  mutate(avg_amnt_per_trx = format(avg_amnt_per_trx,format="d", big.mark=",")) %>% 
+  tableHTML() %>% 
+  add_css_row(css = list(c('font-size','font-family'),c('12px','Arial'))) %>% 
+  add_css_row(css = list('background-color', '#f2f2f2'),rows = odd(0:nrow(redeem_high_amnt)+1)) %>%
+  add_css_row(css = list('background-color', '#e6f0ff'),rows = even(0:nrow(redeem_high_amnt)+1)) %>%
+  add_css_column(css = list('text-align', 'right'),columns = c(4:6))%>%
+  add_css_column(css = list('font-weight', 'bold'),columns = c(5))
+
+```
+
+***  
+  
+####Top 10 Customer High Redeem Bonus by Count Trx
+```{r, echo=FALSE, results = "asis"}
+redeem_high_cnt %>%
+  mutate(total_redeemed_amount = format(total_redeemed_amount,format="d", big.mark=",")) %>% 
+  mutate(avg_amnt_per_trx = format(avg_amnt_per_trx,format="d", big.mark=",")) %>% 
+  tableHTML() %>% 
+  add_css_row(css = list(c('font-size','font-family'),c('12px','Arial'))) %>% 
+  add_css_row(css = list('background-color', '#f2f2f2'),rows = odd(0:nrow(redeem_high_cnt)+1)) %>%
+  add_css_row(css = list('background-color', '#e6f0ff'),rows = even(0:nrow(redeem_high_cnt)+1)) %>%
+  add_css_column(css = list('text-align', 'right'),columns = c(4:6))%>%
+  add_css_column(css = list('font-weight', 'bold'),columns = c(4))
+
+```
+
+***  
+  
+####Top 20 Customer Recurrent Debit Trx (interval 60 sec)
+```{r, echo=FALSE, results = "asis"}
+
+recurrent_cashout %>%
+  mutate(total_debit_amount = format(total_debit_amount,format="d", big.mark=",")) %>% 
+  mutate(avg_amnt_per_trx = format(avg_amnt_per_trx,format="d", big.mark=",")) %>% 
+  tableHTML() %>% 
+  add_css_row(css = list(c('font-size','font-family'),c('12px','Arial'))) %>% 
+  add_css_row(css = list('background-color', '#f2f2f2'),rows = odd(0:nrow(recurrent_cashout)+1)) %>%
+  add_css_row(css = list('background-color', '#e6f0ff'),rows = even(0:nrow(recurrent_cashout)+1)) %>%
+  add_css_column(css = list('text-align', 'right'),columns = c(4:6))%>%
+  add_css_column(css = list('font-weight', 'bold'),columns = c(4))
+```
+
+***  
+  
+####Top 20 Customer Recurrent Credit Trx (interval 60 sec)
+```{r, echo=FALSE, results = "asis"}
+
+recurrent_cashin %>%
+  mutate(total_credit_amount = format(total_credit_amount,format="d", big.mark=",")) %>% 
+  mutate(avg_amnt_per_trx = format(avg_amnt_per_trx,format="d", big.mark=",")) %>% 
+  tableHTML() %>% 
+  add_css_row(css = list(c('font-size','font-family'),c('12px','Arial'))) %>% 
+  add_css_row(css = list('background-color', '#f2f2f2'),rows = odd(0:nrow(recurrent_cashin)+1)) %>%
+  add_css_row(css = list('background-color', '#e6f0ff'),rows = even(0:nrow(recurrent_cashin)+1)) %>%
+  add_css_column(css = list('text-align', 'right'),columns = c(4:6))%>%
+  add_css_column(css = list('font-weight', 'bold'),columns = c(4))
+```
+
+***  
+  
+####Balance Movement Integrity
+Note :  
+Balance gap will not be valid if transaction_id not representing actual transaction sequence (unordered) 
+
+```{r, echo=FALSE, results = "asis"}
+
+sum_open_closing_df %>%
+  mutate(credit = format(credit,format="d", big.mark=",")) %>% 
+  mutate(debit = format(debit,format="d", big.mark=",")) %>% 
+  mutate(net_usage = format(net_usage,format="d", big.mark=",")) %>% 
+  mutate(opening_balance = format(opening_balance,format="d", big.mark=",")) %>%
+  mutate(closing_balance = format(closing_balance,format="d", big.mark=",")) %>% 
+  mutate(closing_formula = format(closing_formula,format="d", big.mark=",")) %>%
+  mutate(gap_closing = format(gap_closing,format="d", big.mark=",")) %>% 
+  tableHTML() %>% 
+  add_css_row(css = list(c('font-size','font-family'),c('12px','Arial'))) %>% 
+  add_css_row(css = list('background-color', '#f2f2f2'),rows = odd(0:nrow(sum_open_closing_df)+1)) %>%
+  add_css_row(css = list('background-color', '#e6f0ff'),rows = even(0:nrow(sum_open_closing_df)+1)) %>%
+  add_css_column(css = list('text-align', 'right'),columns = c(3:9))%>%
+  add_css_column(css = list('font-weight', 'bold'),columns = c(9))
+
+```
